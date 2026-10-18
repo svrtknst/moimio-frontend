@@ -36,6 +36,7 @@ import { createContext, useContext, useState, useCallback, useEffect, useRef } f
 import enTranslations from '../i18n/locales/en.json';
 
 export const SUPPORTED_LANGS = [
+  { code: 'sv',    label: 'Svenska' },
   { code: 'en',    label: 'English' },
   { code: 'de',    label: 'Deutsch' },
   { code: 'ko',    label: '한국어' },
