@@ -45,10 +45,6 @@
         }
     }
 
-    handle /debug-env {
-        respond "BACKEND_URL={$BACKEND_URL:NOT_SET} BACKEND_HOST={$BACKEND_HOST:NOT_SET}"
-    }
-
     # Health endpoint, same routing rules as /api.
     handle /health {
         reverse_proxy {$BACKEND_URL}
