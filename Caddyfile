@@ -1,6 +1,9 @@
 # Caddy serves the production Vite bundle out of /srv and reverse-
 # proxies /api/* and /health to the backend container.
 #
+# Set BACKEND_URL in the frontend container to change the proxy target.
+# Defaults to backend:8000 for the existing compose deployment.
+#
 # Listens on :5173 internally so the docker-compose port mapping
 # (6120:5173) is consistent.
 #
@@ -30,7 +33,7 @@
     # `read_buffer` was incorrect for HTTP/1.1 SSE traffic.
     @sse path /api/events/*/checkin/stream /api/events/*/organise/stream
     handle @sse {
-        reverse_proxy http://backend:8000 {
+        reverse_proxy {$BACKEND_URL:backend:8000} {
             flush_interval -1
         }
     }
@@ -38,14 +41,14 @@
     # Reverse-proxy the API. `backend` resolves to the backend
     # service on the moimio_default network (created by compose).
     handle /api/* {
-        reverse_proxy http://backend:8000 {
+        reverse_proxy {$BACKEND_URL:backend:8000} {
             header_up X-Real-IP {client_ip}
         }
     }
 
     # Health endpoint, same routing rules as /api.
     handle /health {
-        reverse_proxy http://backend:8000
+        reverse_proxy {$BACKEND_URL:backend:8000}
     }
 
     # v0.99c update-prompt reliability fix:

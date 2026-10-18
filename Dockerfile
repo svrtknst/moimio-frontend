@@ -42,6 +42,10 @@ RUN npm run build
 # --- Stage 2: runtime ---
 FROM caddy:2-alpine
 
+# Override with `docker run -e BACKEND_URL=backend:8080 ...` or the
+# equivalent environment setting in Docker Compose.
+ENV BACKEND_URL=backend:8000
+
 # Caddy looks at /etc/caddy/Caddyfile by default (see the caddy
 # image's CMD). We ship our Caddyfile there, and the build output
 # at /srv which is Caddy's conventional web-root on Alpine.
