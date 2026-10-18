@@ -5,26 +5,6 @@ import { I18nProvider, useI18n, SUPPORTED_LANGS } from '../hooks/useI18n';
 import TranslatedError from '../components/TranslatedError';
 import DemoNotice from '../components/DemoNotice';
 
-// v1.0.1d grouping v2: mirror the backend group-code rules so the live
-// preview matches exactly what the server will store.
-//   stemFromName    → backend _stem_from: accents folded (Müller → MULLER),
-//                     uppercase, A-Z/0-9 only, max 8, fallback "GROUP"
-//                     (e.g. a Hangul-only surname → GROUP).
-//   isCompleteGroupCode → backend _is_complete_code: STEM-NNN shape.
-// Same table as backend _STEM_TRANSLIT.
-const STEM_TRANSLIT = {
-  'ß': 'SS', 'ẞ': 'SS', 'Æ': 'AE', 'æ': 'AE', 'Œ': 'OE', 'œ': 'OE',
-  'Ø': 'O', 'ø': 'O', 'Đ': 'D', 'đ': 'D', 'Ð': 'D', 'ð': 'D',
-  'Ł': 'L', 'ł': 'L', 'Þ': 'TH', 'þ': 'TH', 'ı': 'I',
-};
-const stemFromName = (text) => {
-  const folded = Array.from(text || '', (ch) => STEM_TRANSLIT[ch] ?? ch).join('')
-    .normalize('NFKD').replace(/[̀-ͯ]/g, '');
-  const cleaned = folded.toUpperCase().replace(/[^A-Z0-9]/g, '');
-  return cleaned.slice(0, 8) || 'GROUP';
-};
-const isCompleteGroupCode = (code) => /^[A-Z0-9]+-\d+$/.test((code || '').trim().toUpperCase());
-
 // Inner component — uses i18n context
 function RegisterForm() {
   const { eventId } = useParams();
@@ -40,7 +20,7 @@ function RegisterForm() {
     first_name: '', last_name: '', email: '',
     gender: '', date_of_birth: '', phone: '',
     address: '', country: '', church_organisation: '',
-    message: '', group_code: '', gdpr_consent: false,
+    message: '', gdpr_consent: false,
   });
   const [customValues, setCustomValues] = useState({});
   const [error, setError] = useState(null);
@@ -54,16 +34,6 @@ function RegisterForm() {
   const [confirmationRequired, setConfirmationRequired] = useState(false);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
-  const [prefEnabled, setPrefEnabled] = useState(false);
-  const [categories, setCategories] = useState([]);
-  const [preferences, setPreferences] = useState([
-    { preferred_participant_number: '', preferred_name: '', preferred_details: '' }
-  ]);
-  // Grouping mode: 'none' (default) | 'code' (have a group code) | 'request' (have name only)
-  const [groupingMode, setGroupingMode] = useState('none');
-  // v1.0.1d grouping v2: "start a group" custom-name field.
-  const [startCustomName, setStartCustomName] = useState('');
-  const [showCustomName, setShowCustomName] = useState(false);
   const [extraPersons, setExtraPersons] = useState([]); // multi-person registration
   // v0.70d-3c-8a: per-extra-person validation errors. Same shape as
   // extraPersons but values are error-flag objects:
@@ -103,12 +73,6 @@ function RegisterForm() {
           setPrivacyNoticeUrl(typeof ws?.privacy_notice_url === 'string' && ws.privacy_notice_url ? ws.privacy_notice_url : null);
         }
       } catch { /* no link, nothing else changes */ }
-      // Load categories for preference scope selector (if prefs enabled)
-      if (eventData.settings?.enable_group_preferences) {
-        setPrefEnabled(true);
-        const catRes = await fetch(apiUrl(`/api/events/${eventId}/allocation-categories/public`));
-        if (catRes.ok) setCategories(await catRes.json());
-      }
     } catch (err) {
       setError(err);
     } finally {
@@ -122,7 +86,6 @@ function RegisterForm() {
             if (d.formData) setFormData(fd => ({ ...fd, ...d.formData }));
             if (d.customValues) setCustomValues(d.customValues);
             if (d.extraPersons) setExtraPersons(d.extraPersons);
-            if (d.groupingMode) setGroupingMode(d.groupingMode === 'code' ? 'join' : d.groupingMode);
           }
         } catch {}
       }
@@ -152,12 +115,6 @@ function RegisterForm() {
     clearFieldError(`cf_${fieldId}`);
     setCustomValues(prev => ({ ...prev, [fieldId]: value }));
   };
-
-  const updatePref = (idx, field, value) => {
-    setPreferences(prev => prev.map((p, i) => i === idx ? { ...p, [field]: value } : p));
-  };
-  const addPref = () => setPreferences(prev => [...prev, { preferred_participant_number: '', preferred_name: '', preferred_details: '' }]);
-  const removePref = (idx) => setPreferences(prev => prev.filter((_, i) => i !== idx));
 
   const isFieldEnabled = (name) => fields.find(f => f.field_name === name)?.is_enabled || false;
   const isFieldRequired = (name) => fields.find(f => f.field_name === name)?.is_required || false;
@@ -327,41 +284,11 @@ function RegisterForm() {
         if (isFieldEnabled(f) && formData[f]) submission[f] = formData[f];
       }
       if (formData.message) submission.message = formData.message;
-      // v1.0.1d grouping v2. 'join' sends the code the registrant was
-      // given. 'start' sends a custom group name only if the registrant
-      // opened the customise field and typed one; otherwise nothing is
-      // sent and the backend derives the code from the surname. 'none'
-      // and 'request' send no group_code here.
-      if (groupingMode === 'join' && formData.group_code.trim()) {
-        submission.group_code = formData.group_code.trim();
-      } else if (groupingMode === 'start' && showCustomName && startCustomName.trim()) {
-        // Normalise to the stem so the custom field ALWAYS starts a fresh
-        // group with an auto-suffix (typing a full code shape like
-        // JUGEND-104 here must not silently join that group).
-        submission.group_code = stemFromName(startCustomName);
-      }
       const cfEntries = Object.entries(customValues).filter(([_, v]) => v);
       if (cfEntries.length > 0) submission.custom_fields = Object.fromEntries(cfEntries);
       submission.preferred_language = lang;
-      // Send preference requests only if user picked 'request' mode and prefs are enabled
-      if (groupingMode === 'request' && prefEnabled) {
-        const filledPrefs = preferences.filter(p => p.preferred_name.trim() || p.preferred_participant_number);
-        if (filledPrefs.length > 0) {
-          submission.preference_requests = filledPrefs.map(p => ({
-            preferred_participant_number: p.preferred_participant_number ? parseInt(p.preferred_participant_number) : null,
-            preferred_name: p.preferred_name.trim() || null,
-            preferred_details: p.preferred_details.trim() || null,
-          }));
-        }
-      }
-      // v1.0.0m: capture the primary's response so extras with
-      // groupCodeMode === 'same' can inherit the *resolved* code (the
-      // STEM-NNN the backend actually saved) rather than the typed
-      // stem. Pre-1.0.0m the typed value was re-sent and re-resolved
-      // for each extra, producing a fresh suffix per person and
-      // silently scattering "same code" families across clusters.
-      // The backend treats a complete STEM-NNN as verbatim, so the
-      // inherited value is taken as-is — same cluster guaranteed.
+      // Keep the backend-resolved code so extras that choose "same"
+      // stay in the primary registrant's group.
       const primaryResp = await participants.register(eventId, submission);
       const inheritedGroupCode = primaryResp?.group_code || null;
 
@@ -396,15 +323,8 @@ function RegisterForm() {
         // Group code: per-person three-way choice.
         // 'own'  → use ep.group_code if filled, otherwise no code sent
         // 'none' → explicitly no code, even if primary has one
-        // 'same' → inherit the primary's *resolved* code from the
-        //          registration response (a complete STEM-NNN). Works
-        //          across all three primary groupingMode values — if
-        //          primary picked 'none' or 'request', they still got
-        //          an auto-generated code from the backend, and
-        //          "same" honours its label: the extra goes into that
-        //          same cluster regardless of which path the primary
-        //          took to get there. Fixes v1.0.0l symptom: extras
-        //          got a fresh STEM-NNN even when "same" was ticked.
+        // 'same' → inherit the primary's resolved code so all people
+        //          added in this form stay together.
         if (ep.groupCodeMode === 'own' && ep.group_code?.trim()) {
           epSubmission.group_code = ep.group_code.trim();
         } else if (ep.groupCodeMode === 'same' && inheritedGroupCode) {
@@ -742,122 +662,6 @@ function RegisterForm() {
                 {fieldError(`cf_${cf.id}`)}
               </div>
             ))}
-
-            {/* ═══ UNIFIED GROUPING SECTION ═══ */}
-            <div className="border border-steel-blue/20 rounded-xl p-4 bg-steel-blue/5">
-              <h3 className="font-heading font-bold text-deep-navy text-sm mb-1">{t('grouping.section_title')}</h3>
-              <p className="text-xs text-gray-500 mb-3 leading-relaxed">{t('grouping.section_hint')}</p>
-
-              {/* Radio options */}
-              <div className="space-y-1.5 mb-3">
-                <label className="flex items-start gap-2.5 cursor-pointer p-2 rounded-lg hover:bg-white/60 transition-colors">
-                  <input type="radio" name="grouping_mode" value="none"
-                    checked={groupingMode === 'none'}
-                    onChange={() => setGroupingMode('none')}
-                    className="mt-0.5 h-4 w-4 text-steel-blue focus:ring-steel-blue" />
-                  <span className="text-xs text-gray-700">{t('grouping.option_none')}</span>
-                </label>
-
-                <label className="flex items-start gap-2.5 cursor-pointer p-2 rounded-lg hover:bg-white/60 transition-colors">
-                  <input type="radio" name="grouping_mode" value="join"
-                    checked={groupingMode === 'join'}
-                    onChange={() => setGroupingMode('join')}
-                    className="mt-0.5 h-4 w-4 text-steel-blue focus:ring-steel-blue" />
-                  <span className="text-xs text-gray-700">{t('grouping.option_join')}</span>
-                </label>
-
-                <label className="flex items-start gap-2.5 cursor-pointer p-2 rounded-lg hover:bg-white/60 transition-colors">
-                  <input type="radio" name="grouping_mode" value="start"
-                    checked={groupingMode === 'start'}
-                    onChange={() => setGroupingMode('start')}
-                    className="mt-0.5 h-4 w-4 text-steel-blue focus:ring-steel-blue" />
-                  <span className="text-xs text-gray-700">{t('grouping.option_start')}</span>
-                </label>
-
-                {prefEnabled && (
-                  <label className="flex items-start gap-2.5 cursor-pointer p-2 rounded-lg hover:bg-white/60 transition-colors">
-                    <input type="radio" name="grouping_mode" value="request"
-                      checked={groupingMode === 'request'}
-                      onChange={() => setGroupingMode('request')}
-                      className="mt-0.5 h-4 w-4 text-steel-blue focus:ring-steel-blue" />
-                    <span className="text-xs text-gray-700">{t('grouping.option_request')}</span>
-                  </label>
-                )}
-              </div>
-
-              {/* Conditional content: join mode — enter a code you were given */}
-              {groupingMode === 'join' && (
-                <div className="bg-white rounded-lg p-3 space-y-2">
-                  <p className="text-[11px] text-gray-500 leading-relaxed">{t('grouping.join_hint')}</p>
-                  <input type="text" name="group_code" value={formData.group_code} onChange={handleChange}
-                    placeholder={t('grouping.join_placeholder')}
-                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-steel-blue" />
-                  {formData.group_code.trim() && (
-                    <p className="text-[11px] leading-relaxed"
-                      style={{ color: isCompleteGroupCode(formData.group_code) ? 'var(--success-green, #15803d)' : 'var(--text-muted)' }}>
-                      {isCompleteGroupCode(formData.group_code) ? t('grouping.live_join') : t('grouping.live_incomplete')}
-                    </p>
-                  )}
-                </div>
-              )}
-
-              {/* Conditional content: start mode — first of a new group.
-                  No code to type: the preview shows what the code will look
-                  like, derived live from the surname (or a custom name). */}
-              {groupingMode === 'start' && (
-                <div className="bg-white rounded-lg p-3 space-y-2">
-                  <p className="text-[11px] text-gray-500 leading-relaxed">
-                    {t('grouping.start_info', { stem: stemFromName(showCustomName && startCustomName ? startCustomName : formData.last_name) })}
-                  </p>
-                  {showCustomName ? (
-                    <input type="text" value={startCustomName}
-                      onChange={e => setStartCustomName(e.target.value)}
-                      placeholder={t('grouping.custom_placeholder')}
-                      className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-steel-blue" />
-                  ) : (
-                    <button type="button" onClick={() => setShowCustomName(true)}
-                      className="text-[11px] font-semibold text-steel-blue hover:opacity-80">
-                      {t('grouping.start_customise')}
-                    </button>
-                  )}
-                </div>
-              )}
-
-              {/* Conditional content: request mode */}
-              {groupingMode === 'request' && prefEnabled && (
-                <div className="bg-white rounded-lg p-3 space-y-3">
-                  <p className="text-[11px] text-gray-500 leading-relaxed">{t('grouping.request_explainer')}</p>
-                  {preferences.map((pref, idx) => (
-                    <div key={idx} className="space-y-2">
-                      {idx > 0 && (
-                        <div className="flex items-center justify-between">
-                          <span className="text-[10px] font-semibold text-gray-500">#{idx + 1}</span>
-                          <button type="button" onClick={() => removePref(idx)}
-                            className="text-[10px] text-alert hover:opacity-80">{t('common.remove')}</button>
-                        </div>
-                      )}
-                      <input type="text" value={pref.preferred_name}
-                        onChange={e => updatePref(idx, 'preferred_name', e.target.value)}
-                        placeholder={t('grouping.request_name')}
-                        className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-steel-blue" />
-                      <textarea value={pref.preferred_details}
-                        onChange={e => updatePref(idx, 'preferred_details', e.target.value)}
-                        placeholder={t('grouping.request_details')}
-                        rows={2}
-                        className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-steel-blue resize-none" />
-                      {/* There is no scoping selector. A grouping request once
-                          carried a hidden limit to particular group types; it
-                          was never rendered and nothing ever acted on it, and
-                          it was retired in v1.0.4r. */}
-                    </div>
-                  ))}
-                  <button type="button" onClick={addPref}
-                    className="text-[11px] text-steel-blue hover:text-mid-navy font-semibold">
-                    {t('prefs.add_another')}
-                  </button>
-                </div>
-              )}
-            </div>
 
             {/* Message */}
             <div>
