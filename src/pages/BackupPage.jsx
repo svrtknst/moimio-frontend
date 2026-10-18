@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useI18n } from '../hooks/useI18n';
-import { getToken } from '../services/api';
+import { apiUrl, getToken } from '../services/api';
 import RestoreModal from '../components/RestoreModal';
 import EmptyState from '../components/EmptyState';
 import TranslatedError from '../components/TranslatedError';
@@ -26,7 +26,7 @@ export default function BackupPage() {
   const [mode, setMode] = useState('full');
 
   useEffect(() => {
-    fetch('/api/events/', { headers: { Authorization: `Bearer ${getToken()}` } })
+    fetch(apiUrl('/api/events/'), { headers: { Authorization: `Bearer ${getToken()}` } })
       .then(r => r.json())
       .then(data => { setEvents(Array.isArray(data) ? data : []); setLoading(false); })
       .catch(() => setLoading(false));
@@ -60,7 +60,7 @@ export default function BackupPage() {
         // is selected. Server-side the filename suffix differentiates
         // the ZIP name too (moimio-backup-<id>-structure.zip).
         const qs = mode === 'structure' ? '?mode=structure' : '';
-        const res = await fetch(`/api/events/${ev.id}/export/backup.zip${qs}`, {
+        const res = await fetch(apiUrl(`/api/events/${ev.id}/export/backup.zip${qs}`), {
           headers: { Authorization: `Bearer ${getToken()}` },
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);

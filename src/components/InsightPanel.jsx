@@ -5,6 +5,7 @@ import {
   customFields as cfApi,
   allocations as allocApi,
   allocationCategories as catApi,
+  apiUrl,
   getToken,
 } from '../services/api';
 import { useI18n } from '../hooks/useI18n';
@@ -128,7 +129,7 @@ export default function InsightPanel({ participant, eventId, marksForPerson = []
       try {
         const unitLists = await Promise.all(
           (cats || []).map(c =>
-            fetch(`/api/events/${eventId}/allocation-categories/${c.id}/units/`, {
+            fetch(apiUrl(`/api/events/${eventId}/allocation-categories/${c.id}/units/`), {
               headers: { Authorization: `Bearer ${getToken() || ''}` },
             })
               .then(r => r.ok ? r.json() : [])

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { I18nProvider, useI18n } from '../hooks/useI18n';
+import { apiUrl } from '../services/api';
 import Wordmark from '../components/Wordmark';
 import ThemeToggle from '../components/ThemeToggle';
 
@@ -48,7 +49,7 @@ function ConfirmContent() {
 
   const confirmRegistration = async () => {
     try {
-      const res = await fetch(`/api/participants/confirm/${token}`);
+      const res = await fetch(apiUrl(`/api/participants/confirm/${token}`));
       const data = await res.json().catch(() => null);
       if (res.ok) {
         // 2xx — backend returned {state: 'fresh'|'already', status: 'confirmed'}

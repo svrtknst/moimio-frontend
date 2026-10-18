@@ -1,7 +1,7 @@
 import { useState, useRef } from 'react';
 import { useI18n } from '../hooks/useI18n';
 import { useToast } from '../hooks/useToast';
-import { getToken } from '../services/api';
+import { apiUrl, getToken } from '../services/api';
 import TranslatedError from './TranslatedError';
 
 /**
@@ -37,7 +37,7 @@ export default function BatchRegisterModal({ eventId, onClose, onDone }) {
   const handleTemplateDownload = async () => {
     try {
       const res = await fetch(
-        `/api/events/${eventId}/participants/batch/template.csv`,
+        apiUrl(`/api/events/${eventId}/participants/batch/template.csv`),
         { headers: { Authorization: `Bearer ${getToken()}` } }
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -79,7 +79,7 @@ export default function BatchRegisterModal({ eventId, onClose, onDone }) {
       const form = new FormData();
       form.append('file', file);
       const res = await fetch(
-        `/api/events/${eventId}/participants/batch/preview?dob_format=${dobFormat}`,
+        apiUrl(`/api/events/${eventId}/participants/batch/preview?dob_format=${dobFormat}`),
         { method: 'POST', headers: { Authorization: `Bearer ${getToken()}` }, body: form }
       );
       const json = await res.json().catch(() => null);
@@ -138,7 +138,7 @@ export default function BatchRegisterModal({ eventId, onClose, onDone }) {
     setError(null);
     try {
       const res = await fetch(
-        `/api/events/${eventId}/participants/batch/commit`,
+        apiUrl(`/api/events/${eventId}/participants/batch/commit`),
         {
           method: 'POST',
           headers: {

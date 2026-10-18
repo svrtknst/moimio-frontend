@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { events as eventsApi, getToken } from '../services/api';
+import { apiUrl, events as eventsApi, getToken } from '../services/api';
 import { formatErrorMessage } from '../services/api';
 import { useI18n } from '../hooks/useI18n';
 
@@ -106,7 +106,7 @@ export default function ReportsPanel({ eventId, eventName, phase }) {
       // ALLOCATION" banner, footer page counter, etc.) come back in
       // the target language rather than English.
       params.set('lang', pdfLang);
-      const url = `/api/events/${eventId}/export/category/${categoryId}/pdf?${params.toString()}`;
+      const url = apiUrl(`/api/events/${eventId}/export/category/${categoryId}/pdf?${params.toString()}`);
       const res = await fetch(url, { headers: { Authorization: `Bearer ${getToken()}` } });
       if (!res.ok) {
         // v0.70d-3c-8a: backend now returns dict-detail

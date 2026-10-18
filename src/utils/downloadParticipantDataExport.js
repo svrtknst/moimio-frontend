@@ -1,3 +1,5 @@
+import { apiUrl } from '../services/api';
+
 /**
  * downloadParticipantDataExport — fetch a participant's DSAR export
  * and trigger a browser download. v0.73.
@@ -35,7 +37,7 @@ export async function downloadParticipantDataExport({ eventId, participantId, to
   let res;
   try {
     res = await fetch(
-      `/api/events/${eventId}/participants/${participantId}/data-export`,
+      apiUrl(`/api/events/${eventId}/participants/${participantId}/data-export`),
       { headers: { Authorization: `Bearer ${token || ''}` } }
     );
   } catch (err) {
