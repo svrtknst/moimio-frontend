@@ -1,0 +1,413 @@
+import { useState, useEffect, useCallback } from 'react';
+import { allocationCategories } from '../services/api';
+import { useConfirmOverlay } from './ConfirmOverlay';
+import { EditIconButton, DeleteIconButton } from './RowActions';
+import { useI18n } from '../hooks/useI18n';
+import TranslatedError from './TranslatedError';
+import { typeName, editStateFor, updatePayloadFor } from '../utils/groupTypeLabel';
+
+// v0.61c-1: detect a pointer device with a fine-grained pointer (mouse,
+// trackpad). Touch-only devices report `coarse` and report `pointer:
+// none` for hover-driven interactions. We use this to gate drag-to-
+// reorder, which is a desktop affordance — touch devices use the
+// ▲▼ arrows. Reading at module scope (not on every render) is fine
+// because pointer capability doesn't change mid-session in any
+// realistic way; viewport width does (rotate), pointer-fine doesn't
+// (you don't suddenly grow a mouse).
+const HAS_FINE_POINTER = typeof window !== 'undefined'
+  && typeof window.matchMedia === 'function'
+  && window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+
+/**
+ * GroupTypesEditor — standalone manage UI for allocation categories.
+ *
+ * Extracted from OrganiseDashboard (v0.58c) so the same component can be
+ * used from two surfaces:
+ *   - Setup phase (`SetupHub` group_types card) — where there are no
+ *     participants yet and showing a board would be misleading.
+ *   - Event phase (`OrganiseDashboard` collapsible "Manage Group Types"
+ *     section) — same editor, wrapped in a collapsible on the board.
+ *
+ * Self-contained: owns its own categories state, its own editingCat
+ * (not shared with the parent's board-side editingCat), and its own
+ * confirm overlay. Calls `onChange` after every successful mutation
+ * so parents can refresh their derived state (grid, summary text).
+ *
+ * Props:
+ *   eventId           — required
+ *   isAdmin           — required; renders nothing if false (non-admins can't edit)
+ *   onChange          — optional callback; fired after create/update/delete
+ *   initialEditCatId  — v1.0.0p: optional cat.id to seed editingCat
+ *                       when the editor mounts/opens. Lets the parent's
+ *                       per-column kebab "Settings" action jump straight
+ *                       into edit mode for the clicked category without
+ *                       the user having to find the row and click Edit
+ *                       again. Cleared internally once consumed.
+ *   initialShowAddCat — v1.0.0q: optional bool. When true, the
+ *                       add-new form is expanded on mount. Lets the
+ *                       parent's "+ Add group type" button open the
+ *                       band and land directly on the create form
+ *                       (one click instead of two).
+ */
+export default function GroupTypesEditor({ eventId, isAdmin, onChange, onDone, initialEditCatId = null, initialShowAddCat = false }) {
+  const [categories, setCategories] = useState([]);
+  const [editingCat, setEditingCat] = useState(null);
+  const [showAddCat, setShowAddCat] = useState(!!initialShowAddCat);
+  const [newCat, setNewCat] = useState({
+    name: '',
+    item_label: '',
+    rule_type: 'exclusive',
+    // v1.0.3: both ignored by every code path. Sent as true so that a
+    // workspace rolled back to 1.0.2c shows the capacity and gender fields
+    // instead of hiding them.
+    has_capacity: true,
+    has_gender_restriction: true,
+    exclusive_group_codes: false,  // v0.74
+  });
+  const [error, setError] = useState(null);
+  // v0.61c-1: drag-to-reorder gating now uses HAS_FINE_POINTER (mouse/
+  // trackpad detection) instead of the JS-state `isDesktop` viewport
+  // check, which fired true on landscape mobile and on phones with
+  // viewport ≥768 CSS px — the grip ⠿ then surfaced when users
+  // swiped a row sideways. Pointer-fine is a more honest predicate
+  // for "user can drag" than viewport width. Only `dragId` state
+  // remains — needed to visually fade the row being dragged.
+  const [dragId, setDragId] = useState(null);
+  const { confirm, ConfirmOverlay } = useConfirmOverlay();
+  const { t } = useI18n();
+
+  const loadCategories = useCallback(async () => {
+    try {
+      const data = await allocationCategories.list(eventId);
+      setCategories(data);
+      setError(null);
+    } catch (err) { setError(err); }
+  }, [eventId]);
+
+  useEffect(() => { loadCategories(); }, [loadCategories]);
+
+  // v1.0.0p: when the parent passes an initialEditCatId (the kebab
+  // "Settings" action), find that category in the loaded list and
+  // open the inline edit form for it. Runs once per id change so
+  // re-opening the same kebab does not re-trigger.
+  useEffect(() => {
+    if (!initialEditCatId || categories.length === 0) return;
+    const target = categories.find(c => c.id === initialEditCatId);
+    if (target) {
+      setEditingCat(editStateFor(target, t));
+    }
+  }, [initialEditCatId, categories]);
+
+  const notifyChange = () => { if (onChange) onChange(); };
+
+  const handleCreateCat = async (e) => {
+    e.preventDefault();
+    if (!newCat.name.trim()) return;
+    try {
+      await allocationCategories.create(eventId, newCat);
+      setNewCat({ name: '', item_label: '', rule_type: 'exclusive', has_capacity: true, has_gender_restriction: true, exclusive_group_codes: false });
+      setShowAddCat(false);
+      await loadCategories();
+      notifyChange();
+      if (onDone) onDone();   // v1.0.1e-6: close the modal after a successful add
+    } catch (err) { setError(err); }
+  };
+
+  const handleUpdateCat = async (e) => {
+    e.preventDefault();
+    if (!editingCat) return;
+    // v1.0.3: there is no capacity toggle any more. Capacity lives on the
+    // unit, where 0 means no limit.
+    try {
+      // v1.0.4c: send name / item_label only if the text was edited.
+      await allocationCategories.update(eventId, editingCat.id, updatePayloadFor(editingCat));
+      setEditingCat(null);
+      await loadCategories();
+      notifyChange();
+      if (onDone) onDone();   // v1.0.1e-6: close the modal after a successful save
+    } catch (err) { setError(err); }
+  };
+
+  const handleDeleteCat = async (catId) => {
+    const ok = await confirm({
+      title: t('organise.delete_group_type.title'),
+      message: t('organise.delete_group_type.message'),
+      confirmLabel: t('common.delete'),
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await allocationCategories.delete(eventId, catId);
+      await loadCategories();
+      notifyChange();
+    } catch (err) { setError(err); }
+  };
+
+  // v0.58e-1: Reorder up/down — works on both mobile and desktop.
+  // On mobile, the category-grid drag-to-reorder on the board is disabled
+  // (to keep scroll working), so these buttons are the only reorder path
+  // on phones. On desktop both work and either is fine.
+  const handleReorder = async (fromIdx, toIdx) => {
+    if (toIdx < 0 || toIdx >= categories.length) return;
+    const reordered = [...categories];
+    const [moved] = reordered.splice(fromIdx, 1);
+    reordered.splice(toIdx, 0, moved);
+    setCategories(reordered);
+    try {
+      await allocationCategories.reorder(eventId, reordered.map(c => c.id));
+      notifyChange();
+    } catch {
+      loadCategories();
+    }
+  };
+
+  const ruleLabel = (rt) => rt === 'exclusive' ? t('organise.one_per_person') : t('organise.several_per_person');
+
+  if (!isAdmin) return null;
+
+  return (
+    <div className="space-y-3">
+      <TranslatedError err={error} className="text-sm rounded-card p-3" />
+
+      {/* Existing categories list */}
+      {categories.length > 0 && (
+        <div className="space-y-1.5">
+          {categories.map((cat, idx) => (
+            <div key={cat.id}>
+              {editingCat?.id === cat.id ? (
+                <div
+                  className="card-surface-solid rounded-card p-3"
+                  style={{
+                    borderTop: '1px solid var(--card-border)',
+                    borderRight: '1px solid var(--card-border)',
+                    borderBottom: '1px solid var(--card-border)',
+                    borderLeft: '3px solid var(--io-accent)',
+                  }}
+                >
+                  <form onSubmit={handleUpdateCat} className="space-y-2">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs font-semibold" style={{ color: 'var(--io-accent)' }}>
+                        {t('organise.editing', { name: editingCat.name })}
+                      </span>
+                      <button type="button" onClick={() => setEditingCat(null)}
+                        className="text-xs hover:underline"
+                        style={{ color: 'var(--text-subtle)' }}>
+                        {t('common.cancel')}
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-[10px] uppercase tracking-caps font-semibold mb-1"
+                          style={{ color: 'var(--text-subtle)' }}>
+                          {t('organise.group_type_name')}
+                        </label>
+                        <input type="text" value={editingCat.name}
+                          onChange={e => setEditingCat(p => ({ ...p, name: e.target.value }))}
+                          className="w-full rounded-card border bg-[var(--app-bg)] border-[var(--card-border)] text-[var(--text-primary)] px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--io-accent)]" />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] uppercase tracking-caps font-semibold mb-1"
+                          style={{ color: 'var(--text-subtle)' }}>
+                          {t('organise.item_label')}
+                          <span className="font-normal ml-1 normal-case" style={{ color: 'var(--text-subtle)', letterSpacing: 'normal' }}>
+                            {t('organise.item_label.hint')}
+                          </span>
+                        </label>
+                        <input type="text" placeholder={t('organise.item_label_placeholder')} value={editingCat.item_label || ''}
+                          onChange={e => setEditingCat(p => ({ ...p, item_label: e.target.value }))}
+                          className="w-full rounded-card border bg-[var(--app-bg)] border-[var(--card-border)] text-[var(--text-primary)] px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--io-accent)]" />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-caps font-semibold mb-1"
+                        style={{ color: 'var(--text-subtle)' }}>
+                        {t('organise.rule_type.question')}
+                      </label>
+                      <select value={editingCat.rule_type}
+                        onChange={e => setEditingCat(p => ({ ...p, rule_type: e.target.value }))}
+                        className="rounded-card border bg-[var(--app-bg)] border-[var(--card-border)] text-[var(--text-primary)] px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--io-accent)]">
+                        <option value="exclusive">{t('organise.rule.exclusive')}</option>
+                        <option value="overlapping">{t('organise.rule.overlapping')}</option>
+                      </select>
+                    </div>
+                    <div className="flex gap-4 flex-wrap">
+                      {/* v1.0.3: "Capacity limits" checkbox removed. Capacity
+                          is available on every group type; a unit with no
+                          capacity entered has no limit. The old switch hid
+                          the capacity box while a placeholder of 1 was still
+                          saved and enforced, which capped groups at one
+                          person. The column stays for API compat. */}
+                      {/* v1.0-pre #24: "Group codes claim units exclusively"
+                          checkbox removed from this group-type editor — it
+                          now lives in the per-category Engine settings panel
+                          (next to Auto-Allocate), where the rest of the
+                          allocation behaviour is configured. The field stays
+                          on the category record for API compat; existing
+                          values are honoured. */}
+                      {/* v0.74: has_gender_restriction toggle deprecated. Engine
+                          reads unit-level gender_restriction directly. The
+                          checkbox is removed from the UI. The DB column stays
+                          for backward compat, to be dropped at v1.0 cut. */}
+                    </div>
+                    <button type="submit"
+                      className="text-xs font-semibold px-3 py-1.5 rounded-card bg-steel-blue text-white hover:bg-steel-blue-700 dark:bg-gold dark:text-deep-navy dark:hover:bg-gold/80">
+                      {t('common.save')}
+                    </button>
+                  </form>
+                </div>
+              ) : (
+                <div
+                  className="card-surface-solid flex items-center justify-between rounded-card px-3 py-2"
+                  draggable={HAS_FINE_POINTER}
+                  onDragStart={() => setDragId(cat.id)}
+                  onDragOver={e => { if (dragId && dragId !== cat.id) e.preventDefault(); }}
+                  onDrop={() => {
+                    if (!dragId || dragId === cat.id) { setDragId(null); return; }
+                    const fromIdx = categories.findIndex(c => c.id === dragId);
+                    if (fromIdx !== -1) handleReorder(fromIdx, idx);
+                    setDragId(null);
+                  }}
+                  onDragEnd={() => setDragId(null)}
+                  style={{
+                    border: '1px solid var(--card-border)',
+                    cursor: HAS_FINE_POINTER ? 'move' : undefined,
+                    opacity: dragId === cat.id ? 0.4 : 1,
+                  }}
+                >
+                  <div className="min-w-0 flex items-center gap-2">
+                    {/* v0.61c-1: grip — only rendered on devices with a
+                        fine-grained pointer (mouse/trackpad). Touch users
+                        continue with the ▲▼ arrows below. Previously this
+                        was JS-gated on viewport width and surfaced on
+                        landscape mobile when users swiped a row. */}
+                    {HAS_FINE_POINTER && (
+                      <span className="text-[10px] select-none"
+                        style={{ color: 'var(--text-subtle)', opacity: 0.4 }}
+                        aria-hidden="true">
+                        ⠿
+                      </span>
+                    )}
+                    <span className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>{typeName(cat, t)}</span>
+                    <span className="text-[10px] ml-2" style={{ color: 'var(--text-subtle)' }}>
+                      {ruleLabel(cat.rule_type)}
+                    </span>
+                  </div>
+                  <div className="flex gap-2 items-center shrink-0">
+                    {/* v0.58e-1: reorder arrows — universal on mobile + desktop */}
+                    <button
+                      onClick={() => handleReorder(idx, idx - 1)}
+                      disabled={idx === 0}
+                      aria-label={t('organise.move_up')}
+                      title={t('organise.move_up')}
+                      className="text-sm leading-none px-1 disabled:opacity-20 hover:opacity-70"
+                      style={{ color: 'var(--text-subtle)' }}>
+                      ▲
+                    </button>
+                    <button
+                      onClick={() => handleReorder(idx, idx + 1)}
+                      disabled={idx === categories.length - 1}
+                      aria-label={t('organise.move_down')}
+                      title={t('organise.move_down')}
+                      className="text-sm leading-none px-1 disabled:opacity-20 hover:opacity-70"
+                      style={{ color: 'var(--text-subtle)' }}>
+                      ▼
+                    </button>
+                    {/* v1.0.2: last holdout of the consistency sweep — the
+                        internal list's Edit/Delete text links become the
+                        app-standard pen/trash icons (same as MarksPanel,
+                        FormConfigPanel, Users). Reorder arrows unchanged. */}
+                    <EditIconButton onClick={() => setEditingCat(editStateFor(cat, t))}
+                      title={t('common.edit')} className="ml-1" />
+                    <DeleteIconButton onClick={() => handleDeleteCat(cat.id)}
+                      title={t('common.delete')} />
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Add new category */}
+      {!showAddCat ? (
+        <button onClick={() => setShowAddCat(true)}
+          className="text-xs font-semibold hover:underline"
+          style={{ color: 'var(--io-accent)' }}>
+          + {t('organise.add_group_type')}
+        </button>
+      ) : (
+        <div
+          className="bg-neutral-tint rounded-card p-3"
+          style={{ border: '1px solid var(--card-border)' }}
+        >
+          <form onSubmit={handleCreateCat} className="space-y-2">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs font-semibold" style={{ color: 'var(--text-primary)' }}>
+                {t('organise.add_group_type')}
+              </span>
+              <button type="button" onClick={() => setShowAddCat(false)}
+                className="text-xs hover:underline"
+                style={{ color: 'var(--text-subtle)' }}>
+                {t('common.cancel')}
+              </button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <div>
+                <label className="block text-[10px] uppercase tracking-caps font-semibold mb-1"
+                  style={{ color: 'var(--text-subtle)' }}>
+                  {t('organise.group_type_name')}
+                </label>
+                <input type="text" placeholder={t('organise.group_type_name_placeholder')} value={newCat.name}
+                  onChange={e => setNewCat(p => ({ ...p, name: e.target.value }))} required
+                  className="w-full rounded-card border bg-[var(--app-bg)] border-[var(--card-border)] text-[var(--text-primary)] px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--io-accent)]" />
+              </div>
+              <div>
+                <label className="block text-[10px] uppercase tracking-caps font-semibold mb-1"
+                  style={{ color: 'var(--text-subtle)' }}>
+                  {t('organise.item_label')}
+                  <span className="font-normal ml-1 normal-case" style={{ color: 'var(--text-subtle)', letterSpacing: 'normal' }}>
+                    {t('organise.item_label.hint')}
+                  </span>
+                </label>
+                <input type="text" placeholder={t('organise.item_label_placeholder')} value={newCat.item_label}
+                  onChange={e => setNewCat(p => ({ ...p, item_label: e.target.value }))}
+                  className="w-full rounded-card border bg-[var(--app-bg)] border-[var(--card-border)] text-[var(--text-primary)] px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--io-accent)]" />
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-3 items-end">
+              <div>
+                <label className="block text-[10px] uppercase tracking-caps font-semibold mb-1"
+                  style={{ color: 'var(--text-subtle)' }}>
+                  {t('organise.rule_type.question')}
+                </label>
+                <select value={newCat.rule_type}
+                  onChange={e => setNewCat(p => ({ ...p, rule_type: e.target.value }))}
+                  className="rounded-card border bg-[var(--app-bg)] border-[var(--card-border)] text-[var(--text-primary)] px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--io-accent)]">
+                  <option value="exclusive">{t('organise.rule.exclusive_eg')}</option>
+                  <option value="overlapping">{t('organise.rule.overlapping')}</option>
+                </select>
+              </div>
+              {/* v1.0.3: "Capacity limits" checkbox removed — see the edit
+                  form above. */}
+              {/* v1.0.0k: leftover has_gender_restriction toggle removed
+                  from Create form to match Edit form. The v0.74
+                  deprecation only ever removed it from Edit; this
+                  finishes the job. Gender separation lives at the unit
+                  level (per-room gender_restriction column) and is the
+                  field the engine actually reads. The category-level
+                  column stays in the DB for backward compat, defaults
+                  to false on new categories, and is scheduled to be
+                  dropped in a future migration. */}
+              <button type="submit"
+                className="text-xs font-semibold px-4 py-1.5 rounded-card bg-steel-blue text-white hover:bg-steel-blue-700 dark:bg-gold dark:text-deep-navy dark:hover:bg-gold/80">
+                {t('common.create')}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      <ConfirmOverlay />
+    </div>
+  );
+}

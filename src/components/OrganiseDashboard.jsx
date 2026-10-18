@@ -1,0 +1,699 @@
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { allocationCategories, formatErrorMessage } from '../services/api';
+import AllocationBoard from './AllocationBoard';
+import AllocStatusPill, { deriveAllocState, ALLOC_STATE } from './AllocStatusPill';
+import { useConfirmOverlay } from './ConfirmOverlay';
+import { useI18n } from '../hooks/useI18n';
+import { useToast } from '../hooks/useToast';
+import GroupTypesEditor from './GroupTypesEditor';
+
+import ErrorBanner from './ErrorBanner';
+import { typeName, typeItemLabel } from '../utils/groupTypeLabel';
+
+// v0.61c-2: detect a pointer device with a fine-grained pointer
+// (mouse, trackpad). Same predicate as in GroupTypesEditor — see the
+// comment there for the rationale. We use this for drag-to-reorder
+// gating because viewport-width (`isMobileView` below) fires `false`
+// on landscape mobile and on phones with viewport ≥768 CSS px,
+// causing the "DRAG TO REORDER" hint and the draggable attribute
+// to surface on touch devices that swipe a card.
+const HAS_FINE_POINTER = typeof window !== 'undefined'
+  && typeof window.matchMedia === 'function'
+  && window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+
+export default function OrganiseDashboard({ eventId, eventName, participantList, noteCounts, isAdmin, staffPerms, onDataChange }) {
+  const [categories, setCategories] = useState([]);
+  const [selectedCatId, setSelectedCatId] = useState(null);
+  // v1.0.4e: null, or { active, requestBack } published by AllocationBoard
+  // while a proposal is on screen. Drives the header back button's target.
+  const [boardProposal, setBoardProposal] = useState(null);
+  // v0.74a: openSettingsOnNav + triggerSuggestMode + showModePicker
+  // state vars removed. Pre-v0.74a they were set by the per-row
+  // Auto-Allocate split button on the group-type overview. The button
+  // was removed in v0.74a (overview is pure navigation now), and the
+  // state vars + AllocationBoard prop pass became dead code. The
+  // openSettings + triggerSuggestMode props on AllocationBoard remain
+  // available for any future caller that wants to pre-trigger the
+  // engine on navigation.
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [editingCat, setEditingCat] = useState(null);
+  const [dragCatId, setDragCatId] = useState(null);
+  const [dragOverCatId, setDragOverCatId] = useState(null);
+  const [manageOpen, setManageOpen] = useState(false); // collapsible manage section
+  // v1.0.1e-31: room-layout export/import menu
+  const [ioMenuOpen, setIoMenuOpen] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const ioMenuRef = useRef(null);
+  const fileInputRef = useRef(null);
+  // v1.0.0p: per-column inline rename + kebab. State scoped to the
+  // dashboard since both the title click and the kebab Rename action
+  // need to drive the same input. editingCatRenameId = null when
+  // nothing is being inline-renamed; otherwise the cat.id. Draft
+  // buffer holds the in-progress text; saved on Enter/blur, reverted
+  // on Esc or empty value. kebabOpenCatId tracks which column's
+  // dropdown is open (null when all closed).
+  const [editingCatRenameId, setEditingCatRenameId] = useState(null);
+  const [renameDraft, setRenameDraft] = useState('');
+  const [kebabOpenCatId, setKebabOpenCatId] = useState(null);
+  // v0.70d-1 R1: dead proposal / committing / handleCommit state
+  // removed alongside the legacy modal. The real engine flow lives
+  // in AllocationBoard; this dashboard only routes users into it.
+  // v0.61c-2: removed isMobileView state + resize listener — drag-to-
+  // reorder now uses HAS_FINE_POINTER (above), and there are no
+  // remaining viewport-based decisions in this component. AllocationBoard
+  // still keeps its own isMobileView for non-drag layout choices.
+  const { confirm, ConfirmOverlay } = useConfirmOverlay();
+  const { t } = useI18n();
+  // v0.70d-1 R2: shared toast for non-fatal error surfaces (none in
+  // this component today, but hook is imported at the component level
+  // so the ToastHost can mount and react to errors surfaced from
+  // children / effects in future ships).
+  const { ToastHost } = useToast();
+
+  useEffect(() => { loadCategories(); }, [eventId]);
+
+  const loadCategories = useCallback(async () => {
+    try {
+      const data = await allocationCategories.list(eventId);
+      setCategories(data);
+    } catch (err) { setError(err); }
+    finally { setLoading(false); }
+  }, [eventId]);
+
+  // ── v1.0.1e-31: room-layout export / import ──────────────────────────
+  useEffect(() => {
+    if (!ioMenuOpen) return undefined;
+    const onDoc = (e) => {
+      if (ioMenuRef.current && !ioMenuRef.current.contains(e.target)) setIoMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [ioMenuOpen]);
+
+  const handleExportLayout = async () => {
+    setIoMenuOpen(false);
+    try {
+      const payload = await allocationCategories.exportLayout(eventId);
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const safe = (eventName || 'event').replace(/[^\w.-]+/g, '_').slice(0, 40);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${safe}_group-types.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) { setError(err); }
+  };
+
+  const handleImportFile = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = ''; // let the same file be re-selected later
+    if (!file) return;
+    setImporting(true);
+    setError(null);
+    try {
+      const payload = JSON.parse(await file.text());
+      await allocationCategories.importLayout(eventId, payload);
+      await loadCategories();
+      onDataChange?.();
+    } catch (err) {
+      setError(err instanceof SyntaxError ? { i18nKey: 'errors.import.invalid_file' } : err);
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const handleReorderCats = async (fromId, toId) => {
+    if (!fromId || !toId || fromId === toId) return;
+    const ids = categories.map(c => c.id);
+    const from = ids.indexOf(fromId);
+    const to = ids.indexOf(toId);
+    if (from === -1 || to === -1) return;
+    const reordered = [...ids];
+    reordered.splice(from, 1);
+    reordered.splice(to, 0, fromId);
+    setCategories(reordered.map(id => categories.find(c => c.id === id)));
+    try { await allocationCategories.reorder(eventId, reordered); }
+    catch { loadCategories(); }
+    setDragCatId(null); setDragOverCatId(null);
+  };
+
+  const handleUpdateCat = async (e) => {
+    e.preventDefault();
+    if (!editingCat) return;
+    try {
+      await allocationCategories.update(eventId, editingCat.id, editingCat);
+      setEditingCat(null);
+      await loadCategories();
+    } catch (err) { setError(err); }
+  };
+
+  const handleDeleteCat = async (catId) => {
+    const ok = await confirm({
+      title: t('organise.delete_group_type.title'),
+      message: t('organise.delete_group_type.message'),
+      confirmLabel: t('common.delete'),
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await allocationCategories.delete(eventId, catId);
+      if (selectedCatId === catId) setSelectedCatId(null);
+      await loadCategories();
+    } catch (err) { setError(err); }
+  };
+
+  // v1.0.0p: inline-rename open/save/cancel. Same shape as PeopleTable
+  // editing flow — Enter or blur commits, Esc reverts, empty string
+  // reverts (we don't allow nameless group types).
+  const startInlineRename = (cat) => {
+    setKebabOpenCatId(null);
+    setEditingCatRenameId(cat.id);
+    setRenameDraft(typeName(cat, t));  // v1.0.4: rename starts from what they see
+  };
+  const commitInlineRename = async (catId) => {
+    const trimmed = (renameDraft || '').trim();
+    const existing = categories.find(c => c.id === catId);
+    // v1.0.4w: compare against what the box SHOWED, not against the stored
+    // text. The draft is seeded with typeName() above, so for a default group
+    // type — stored "Room Allocation", shown "Zimmerbelegung" — the two never
+    // matched and a stray click saved a rename nobody asked for. The backend's
+    // matches_default guard meant no key was lost, so this was a needless
+    // write rather than a data fault.
+    if (!trimmed || (existing && trimmed === typeName(existing, t))) {
+      // Nothing to save — empty or unchanged. Revert input state.
+      setEditingCatRenameId(null);
+      setRenameDraft('');
+      return;
+    }
+    try {
+      await allocationCategories.update(eventId, catId, { ...existing, name: trimmed });
+      await loadCategories();
+      onDataChange?.();
+    } catch (err) {
+      setError(err);
+    }
+    setEditingCatRenameId(null);
+    setRenameDraft('');
+  };
+  const cancelInlineRename = () => {
+    setEditingCatRenameId(null);
+    setRenameDraft('');
+  };
+
+  // Close any open kebab when clicking outside. Single document-level
+  // listener registered while a kebab is open.
+  useEffect(() => {
+    if (!kebabOpenCatId) return;
+    const onDocClick = () => setKebabOpenCatId(null);
+    // Defer to next tick so the click that opened the menu doesn't
+    // immediately close it.
+    const id = setTimeout(() => document.addEventListener('click', onDocClick), 0);
+    return () => {
+      clearTimeout(id);
+      document.removeEventListener('click', onDocClick);
+    };
+  }, [kebabOpenCatId]);
+
+  // v50c-3b: allocation lifecycle confirm/unconfirm.
+  // Keyed by catId so multiple cards can show their own in-flight state.
+  const [confirmingCatId, setConfirmingCatId] = useState(null);
+
+  const handleConfirmCategory = async (catId, e) => {
+    e?.stopPropagation?.();
+    setConfirmingCatId(catId);
+    try {
+      await allocationCategories.confirm(eventId, catId);
+      await loadCategories();
+      onDataChange?.();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setConfirmingCatId(null);
+    }
+  };
+
+  // v0.50p: handleUnconfirmCategory removed — Unconfirm lives inside
+  // the category detail page (AllocationBoard) now, next to the other
+  // state controls. The dashboard only surfaces forward transitions.
+
+  // ─── Engine settings helper (for category edit form) ───
+  const updateEngineSettings = (setter, key, value) => {
+    setter(prev => {
+      const currentSettings = prev.settings || {};
+      const currentEngine = currentSettings.engine || {};
+      return { ...prev, settings: { ...currentSettings, engine: { ...currentEngine, [key]: value } } };
+    });
+  };
+
+  if (loading) return <p className="text-gray-400 text-sm">{t('common.loading')}</p>;
+
+  const selectedCat = selectedCatId ? categories.find(c => c.id === selectedCatId) : null;
+
+  if (selectedCat) {
+    // v0.50e-1d: per-category overrides removed. Staff access is governed
+    // by a single `organise: "read" | "write" | null` for the whole board.
+    const staffHasWrite = staffPerms && staffPerms['organise'] === 'write';
+    const effectiveIsAdmin = isAdmin || staffHasWrite;
+
+    return (
+      <div>
+        {/* Board header */}
+        <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+          <div className="flex items-center gap-3">
+            {/* v1.0.4e: while a proposal is on screen this button goes
+                back to THIS board, via the same always-confirm discard
+                dialog. It only leaves the group type when no proposal
+                is open. Previously it always left the group type, so
+                dismissing a proposal cost two extra clicks to get back
+                in. */}
+            <button onClick={() => {
+                if (boardProposal?.active) boardProposal.requestBack();
+                else setSelectedCatId(null);
+              }}
+              className="text-sm text-steel-blue hover:text-mid-navy inline-flex items-center gap-1">
+              {t('organise.back')}
+            </button>
+            {/* v1.0.0q: click-to-rename also inside the detail view.
+                Mirrors the overview-card inline rename. Reuses the
+                same editingCatRenameId / renameDraft state so a
+                rename triggered from either surface uses one code
+                path. */}
+            {isAdmin && editingCatRenameId === selectedCat.id ? (
+              <input
+                type="text"
+                autoFocus
+                value={renameDraft}
+                onChange={e => setRenameDraft(e.target.value)}
+                onBlur={() => commitInlineRename(selectedCat.id)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') { e.preventDefault(); commitInlineRename(selectedCat.id); }
+                  else if (e.key === 'Escape') { e.preventDefault(); cancelInlineRename(); }
+                }}
+                className="font-heading text-xl font-bold bg-transparent border-b focus:outline-none focus:border-steel-blue"
+                style={{
+                  color: 'var(--text-primary)',
+                  borderColor: 'var(--io-accent)',
+                  minWidth: '240px',
+                }}
+              />
+            ) : (
+              <h2
+                onClick={isAdmin ? () => startInlineRename(selectedCat) : undefined}
+                title={isAdmin ? t('organise.title_click_to_rename') : undefined}
+                className={`font-heading text-xl font-bold ${isAdmin ? 'cursor-text hover:underline decoration-dotted decoration-1 underline-offset-4' : ''}`}
+                style={{ color: 'var(--text-primary)' }}>
+                {typeName(selectedCat, t)}
+              </h2>
+            )}
+            {/* v0.60e: removed the "one per person / several per person"
+                badge that used to sit here. It was redundant (organiser
+                already picked this category; the rule is set), and its
+                `bg-gray-100 text-gray-400` styling rendered as a pale
+                blob with poor contrast in dark mode. The same rule info
+                still appears under each category tile on the category
+                list view (line ~423 below), where it's contextually
+                useful for comparing categories at a glance. */}
+          </div>
+          {isAdmin && (
+            <div className="flex items-center gap-2">
+              {/* v0.70d-3c-8: 'Edit group type' button removed —
+                  editing now lives in the 'Manage group types' overview
+                  in OrganiseDashboard. Per-category Auto-Zuordnung
+                  settings still live in the gear popover here. Keeping
+                  delete because it's a per-category destructive
+                  action that's natural to perform from the detail
+                  view. */}
+              <button onClick={() => handleDeleteCat(selectedCat.id)}
+                className="text-xs text-alert hover:opacity-80 border border-alert rounded-lg px-3 py-1.5">
+                {t('organise.delete_group_type')}
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Edit category inline */}
+        {/* v0.70d-3c-8: inline editingCat form removed —
+            edit lives in the Einteilung overview now. */}
+
+        <AllocationBoard
+          eventId={eventId}
+          eventName={eventName}
+          category={selectedCat}
+          allCategories={categories}
+          onSelectCategory={setSelectedCatId}
+          participantList={participantList}
+          noteCounts={noteCounts}
+          isAdmin={effectiveIsAdmin}
+          marksPerm={staffPerms?.marks || ''}
+          onDataChange={() => { loadCategories(); if (onDataChange) onDataChange(); }}
+          onProposalStateChange={setBoardProposal}
+        />
+        <ConfirmOverlay />
+        <ToastHost />
+      </div>
+    );
+  }
+
+  // v50c-3c-2d: match AllocationBoard — include pending participants,
+  // exclude only cancelled. Keeps totals aligned between the card stats
+  // and the board's unassigned pool count.
+  const totalParticipants = participantList.filter(p => p.registration_status !== 'cancelled').length;
+  const ruleLabel = (rt) => rt === 'exclusive' ? t('organise.one_per_person') : t('organise.several_per_person');
+
+  return (
+    <div>
+      {error && (() => {
+        const { primary, detail } = formatErrorMessage(error, t);
+        return (
+          <ErrorBanner className="text-sm rounded-card p-3 mb-4">
+            <p className="font-semibold">{primary}</p>
+            {detail && <p className="text-xs opacity-70 mt-1">{detail}</p>}
+          </ErrorBanner>
+        );
+      })()}
+
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="font-heading text-xl font-bold" style={{ color: 'var(--text-primary)' }}>
+          {t('organise.title')}
+        </h2>
+        {isAdmin && (
+          <div className="flex items-center gap-3">
+            <button onClick={() => {
+              // v1.0.0q: now a proper toggle (was set-only in v1.0.0p,
+              // which forced users to click outside to close). Also
+              // clears any kebab-Settings target so opening fresh
+              // from this button doesn't accidentally pre-load an
+              // edit form for some previously-clicked category.
+              setEditingCat(null);
+              setManageOpen(o => !o);
+            }}
+              className="text-xs font-semibold hover:underline flex items-center gap-1"
+              style={{ color: 'var(--io-accent)' }}>
+              <span className="text-sm leading-none">+</span>
+              {t('organise.add_group_type')}
+            </button>
+            {/* v1.0.1e-31 room-layout export/import menu; v1.0.2: the ⋯
+                now sits to the RIGHT of + Add group type — the app-wide
+                pattern is [+ Add {thing}] [⋯], right-bound. */}
+            <div className="relative" ref={ioMenuRef}>
+              <input ref={fileInputRef} type="file" accept="application/json,.json" onChange={handleImportFile} className="hidden" />
+              <button type="button" onClick={() => setIoMenuOpen(o => !o)} disabled={importing}
+                aria-label={t('organise.layout.menu')} aria-haspopup="true" aria-expanded={ioMenuOpen}
+                className="w-7 h-7 flex items-center justify-center rounded-card hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-50"
+                style={{ color: 'var(--text-muted)' }}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <circle cx="5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="19" cy="12" r="1.6" />
+                </svg>
+              </button>
+              {ioMenuOpen && (
+                <div className="absolute right-0 mt-1 w-48 rounded-card border shadow-lg z-30 py-1"
+                  style={{ background: 'var(--card-bg-solid, var(--app-bg))', borderColor: 'var(--card-border)' }}>
+                  <button type="button" onClick={handleExportLayout}
+                    className="w-full text-left px-3 py-2 text-xs hover:bg-black/5 dark:hover:bg-white/10"
+                    style={{ color: 'var(--text-primary)' }}>
+                    {t('organise.layout.export')}
+                  </button>
+                  <button type="button" onClick={() => { setIoMenuOpen(false); fileInputRef.current?.click(); }}
+                    className="w-full text-left px-3 py-2 text-xs hover:bg-black/5 dark:hover:bg-white/10"
+                    style={{ color: 'var(--text-primary)' }}>
+                    {t('organise.layout.import')}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ── Collapsible: Manage Group Types (v0.58c: extracted to GroupTypesEditor) ── */}
+      {isAdmin && manageOpen && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center p-4 overflow-y-auto"
+          style={{ background: 'rgba(0,0,0,0.45)' }}
+          onClick={() => { setManageOpen(false); setEditingCat(null); }}>
+          <div className="rounded-2xl p-4 w-full max-w-2xl my-8"
+            style={{ background: 'var(--card-bg-solid, var(--app-bg))', border: '1px solid var(--card-border)' }}
+            onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-heading font-bold text-sm" style={{ color: 'var(--text-primary)' }}>
+                {editingCat ? t('common.edit') : t('organise.add_group_type')}
+              </h3>
+              <button onClick={() => { setManageOpen(false); setEditingCat(null); }}
+                className="text-lg leading-none hover:opacity-70" style={{ color: 'var(--text-subtle)' }}>×</button>
+            </div>
+            <GroupTypesEditor
+              eventId={eventId}
+              isAdmin={isAdmin}
+              initialEditCatId={editingCat?.id || null}
+              initialShowAddCat={!editingCat}
+              onChange={() => { loadCategories(); if (onDataChange) onDataChange(); }}
+              onDone={() => { setManageOpen(false); setEditingCat(null); }}
+            />
+          </div>
+        </div>
+      )}
+
+
+      {categories.length === 0 ? (
+        <div
+          className="rounded-2xl p-12 text-center"
+          style={{
+            background: 'var(--app-bg)',
+            border: '1px solid var(--card-border)',
+            color: 'var(--text-subtle)',
+          }}
+        >
+          <p className="text-sm">{t('organise.empty')}</p>
+          <p className="text-xs mt-1">{t('organise.empty.hint')}</p>
+        </div>
+      ) : (
+        <div className="grid gap-4 pb-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))' }}>
+          {categories.map((cat, idx) => {
+            // v1.0.4k: this tile is arithmetic, not a filter. Excluded
+            // participants stay in `totalParticipants` and can never be
+            // in `allocated`, so before this every exclusion inflated
+            // the unassigned figure by one. `excluded_count` has been
+            // on the category list payload since v1.0.4i, and this tile
+            // is fed from that list response (loadCategories), never
+            // from a create/update response — so DASH-2 does not reach
+            // it.
+            const excludedCount = cat.excluded_count || 0;
+            const eligibleTotal = Math.max(0, totalParticipants - excludedCount);
+            // v1.0.4zb (DASH-1): subtract distinct PEOPLE, not allocation rows.
+            // `allocated_count` counts rows and is right for the units grid; in
+            // an overlapping group type one person holds several, so
+            // subtracting it from a head-count under-reported the unassigned
+            // figure and could go below zero. `placed_people_count` is the
+            // distinct count, added to the category payload in the same
+            // release. Still not clamped — there is nothing left to clamp.
+            const placedPeople = cat.placed_people_count || 0;
+            const unassigned = eligibleTotal - placedPeople;
+            const pct = eligibleTotal > 0 ? Math.round((placedPeople / eligibleTotal) * 100) : 0;
+            const isDragOver = dragOverCatId === cat.id && dragCatId !== cat.id;
+            const canMoveUp = idx > 0;
+            const canMoveDown = idx < categories.length - 1;
+            return (
+              <div key={cat.id}
+                draggable={isAdmin && HAS_FINE_POINTER}
+                onDragStart={isAdmin && HAS_FINE_POINTER ? () => setDragCatId(cat.id) : undefined}
+                onDragOver={isAdmin && HAS_FINE_POINTER ? (e) => { e.preventDefault(); setDragOverCatId(cat.id); } : undefined}
+                onDragLeave={isAdmin && HAS_FINE_POINTER ? () => setDragOverCatId(null) : undefined}
+                onDrop={isAdmin && HAS_FINE_POINTER ? (e) => { e.preventDefault(); handleReorderCats(dragCatId, cat.id); } : undefined}
+                onClick={() => { if (!dragCatId) setSelectedCatId(cat.id); }}
+                className={`card-surface-solid rounded-xl p-5 cursor-pointer hover:shadow-sm transition-all group select-none border-2 ${isDragOver ? 'border-steel-blue bg-steel-blue/5 scale-[1.01]' : 'border-transparent hover:border-steel-blue/40'}`}
+                id={`cat-${cat.id}`}>
+                {isAdmin && (
+                  <div className="flex items-center justify-end gap-2 -mx-5 -mt-5 mb-3 px-5 py-2 rounded-t-xl" style={{ background: 'rgba(128,128,128,0.06)' }}>
+                    {/* Drag handle — pointer-fine devices only; hidden
+                        visually until hover. v0.61c-2: gated on
+                        HAS_FINE_POINTER so it doesn't surface on touch
+                        devices via swipe-reveal or accidental hover-emulation.
+                        v1.0.2: strip is right-bound (justify-end + mr-auto
+                        here) so the icon group sits on the right edge on
+                        touch too, matching the unit cards — previously
+                        justify-between left-aligned it when this handle
+                        wasn't rendered. */}
+                    {HAS_FINE_POINTER && (
+                      <div className="mr-auto flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity cursor-grab active:cursor-grabbing">
+                        <span className="text-gray-300 text-sm">⠿</span>
+                        <span className="text-[9px] text-gray-300 uppercase tracking-wider">{t('common.drag_to_reorder')}</span>
+                      </div>
+                    )}
+                    {/* Explicit reorder buttons — universal fallback for
+                        touch devices where HTML5 DnD is flaky. Always visible. */}
+                    <div className="flex items-center gap-0.5" onClick={e => e.stopPropagation()}>
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); if (canMoveUp) handleReorderCats(cat.id, categories[idx - 1].id); }}
+                        disabled={!canMoveUp}
+                        aria-label={t('common.move_earlier')}
+                        title={t('common.move_earlier')}
+                        className="w-6 h-6 rounded-md flex items-center justify-center text-xs hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed"
+                        style={{ color: 'var(--text-subtle)' }}
+                      >
+                        ↑
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); if (canMoveDown) handleReorderCats(cat.id, categories[idx + 1].id); }}
+                        disabled={!canMoveDown}
+                        aria-label={t('common.move_later')}
+                        title={t('common.move_later')}
+                        className="w-6 h-6 rounded-md flex items-center justify-center text-xs hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed"
+                        style={{ color: 'var(--text-subtle)' }}
+                      >
+                        ↓
+                      </button>
+                      {/* v1.0.1e-6: kebab collapsed to the app-standard pair —
+                          pen = edit settings (modal), red trash = delete (with
+                          the shared confirm). Rename removed (inline on the
+                          title); "manage units" removed (the card body already
+                          navigates to the unit board). */}
+                      {isAdmin && (
+                        <>
+                          <button type="button"
+                            onClick={(e) => { e.stopPropagation(); setEditingCat(cat); setManageOpen(true); }}
+                            aria-label={t('common.edit')} title={t('common.edit')}
+                            className="w-6 h-6 rounded-md flex items-center justify-center hover:bg-black/5 dark:hover:bg-white/10"
+                            style={{ color: 'var(--text-subtle)' }}>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
+                          </button>
+                          <button type="button"
+                            onClick={(e) => { e.stopPropagation(); handleDeleteCat(cat.id); }}
+                            aria-label={t('common.delete')} title={t('common.delete')}
+                            className="w-6 h-6 rounded-md flex items-center justify-center hover:bg-alert/10"
+                            style={{ color: 'var(--alert)' }}>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M10 11v6M14 11v6" /></svg>
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )}
+                <div className="flex items-start justify-between mb-3">
+                  <div>
+                    {/* v1.0.0p: click-to-rename. Admin clicks title →
+                        input → Enter or blur saves, Esc reverts. The
+                        outer card has its own onClick (navigates to
+                        AllocationBoard), so the inline form needs
+                        stopPropagation on its events to keep clicks
+                        inside it from triggering navigation. */}
+                    {isAdmin && editingCatRenameId === cat.id ? (
+                      <input
+                        type="text"
+                        autoFocus
+                        value={renameDraft}
+                        onClick={e => e.stopPropagation()}
+                        onChange={e => setRenameDraft(e.target.value)}
+                        onBlur={() => commitInlineRename(cat.id)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') { e.preventDefault(); commitInlineRename(cat.id); }
+                          else if (e.key === 'Escape') { e.preventDefault(); cancelInlineRename(); }
+                        }}
+                        className="font-heading font-bold text-lg bg-transparent border-b focus:outline-none focus:border-steel-blue"
+                        style={{
+                          color: 'var(--text-primary)',
+                          borderColor: 'var(--io-accent)',
+                          minWidth: '180px',
+                        }}
+                      />
+                    ) : (
+                      <h3
+                        onClick={isAdmin ? (e) => { e.stopPropagation(); startInlineRename(cat); } : undefined}
+                        title={isAdmin ? t('organise.title_click_to_rename') : undefined}
+                        className={`font-heading font-bold text-lg text-body group-hover:text-steel-blue dark:group-hover:text-gold transition-colors ${isAdmin ? 'cursor-text hover:underline decoration-dotted decoration-1 underline-offset-4' : ''}`}>
+                        {typeName(cat, t)}
+                      </h3>
+                    )}
+                    <p className="text-[10px] text-gray-400 mt-0.5">
+                      {/* v1.0.3: the Capacity and Gender chips are gone. Both
+                          are now available on every group type, so naming
+                          them here distinguished nothing. */}
+                      {ruleLabel(cat.rule_type)}
+                    </p>
+                  </div>
+                  <span className="text-xs font-semibold text-gray-400">{cat.unit_count} × {typeItemLabel(cat, t)}</span>
+                </div>
+                <div className="mb-2">
+                  <div className="flex justify-between text-xs text-gray-500 mb-1">
+                    <span><span className="font-semibold text-body">{placedPeople}</span> {t('organise.assigned')}</span>
+                    <span className="flex items-center gap-2">
+                      <span className="text-pending">{unassigned} {t('organise.unassigned')}</span>
+                      {/* v1.0.4k: shown so the tile still reconciles —
+                          assigned + unassigned + excluded is the whole
+                          active list.
+                          v1.0.4zb: which is why this counts PEOPLE too. Using
+                          the row count here while `unassigned` counted people
+                          would have left the three not adding up in an
+                          overlapping group type. Every figure on this tile is
+                          now a number of people. */}
+                      {excludedCount > 0 && <span>{t('organise.excluded_count', { n: excludedCount })}</span>}
+                    </span>
+                  </div>
+                  <div className="w-full bg-gray-100 dark:bg-white/10 rounded-full h-2">
+                    <div className="bg-steel-blue dark:bg-gold rounded-full h-2 transition-all" style={{ width: `${pct}%` }} />
+                  </div>
+                </div>
+                <div className="flex flex-col gap-2 mt-1">
+                  {/* v0.74a: per-category Auto-Allocate split-button removed
+                      from the overview. Group-type overview is now pure
+                      navigation — click into a group type to run the engine
+                      from inside its allocation board. Removes overview/board
+                      duplication of the same action. */}
+                  {/* v50c-3c-2a: lifecycle CTA on the LEFT, pill on the RIGHT.
+                      All left-bound (no ml-auto) so the card has a stable
+                      left edge regardless of state transitions. Button before
+                      pill matches the reading order: "do this action; current
+                      state is X". */}
+                  {(() => {
+                    const state = deriveAllocState(cat);
+                    const busy = confirmingCatId === cat.id;
+                    return (
+                      <div className="flex items-center gap-2 flex-wrap" onClick={e => e.stopPropagation()}>
+                        {isAdmin && state === ALLOC_STATE.IN_PROGRESS && (
+                          <button
+                            onClick={(e) => handleConfirmCategory(cat.id, e)}
+                            disabled={busy}
+                            title={t('alloc.cta.confirm.hint')}
+                            className="text-[10px] font-semibold px-2.5 py-1 rounded-md bg-steel-blue text-white hover:bg-steel-blue-700 dark:bg-gold dark:text-deep-navy dark:hover:bg-gold/80 disabled:opacity-50 whitespace-nowrap"
+                          >
+                            {busy ? t('alloc.cta.confirming') : t('alloc.cta.confirm')}
+                          </button>
+                        )}
+                        {/* v0.50p: Unconfirm button removed from the dashboard
+                            card. The same action now lives inside the
+                            group-type detail (AllocationBoard) as a
+                            "Confirmed · Unconfirm" banner at the top of the
+                            stats card. The pill here still communicates
+                            state at a glance; Unconfirm is one click away
+                            (click the card → detail page → Unconfirm).
+                            Aligns with the principle that the dashboard
+                            surfaces primary/forward actions while detail
+                            pages handle reversals. */}
+                        <AllocStatusPill state={state} />
+                      </div>
+                    );
+                  })()}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <ConfirmOverlay />
+
+      {/* v0.70d-1 R1 / v0.74a: OrganiseDashboard's legacy proposal
+          modal was dead code (nothing called setProposal) AND the
+          per-category Auto-Allocate split-button that fed
+          setTriggerSuggestMode was removed in v0.74a. The real engine
+          flow lives in AllocationBoard; this dashboard only routes
+          users into it. If a future path ever needs a dashboard-level
+          review it should import ReviewSurface rather than rebuild a
+          modal. */}
+      <ToastHost />
+    </div>
+  );
+}
