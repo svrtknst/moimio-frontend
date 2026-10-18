@@ -2,7 +2,13 @@
  * Moimio API client — all backend communication goes through here.
  */
 
-const API_BASE = '/api';
+const API_ORIGIN = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
+
+export function apiUrl(path) {
+  return `${API_ORIGIN}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
+const API_BASE = apiUrl('/api');
 
 let accessToken = null;
 

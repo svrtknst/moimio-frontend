@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react';
 import { useI18n } from '../hooks/useI18n';
-import { getToken } from '../services/api';
+import { apiUrl, getToken } from '../services/api';
 import TranslatedError from './TranslatedError';
 import { useDateFormat } from '../hooks/useDateFormat';
 import { useNavigate } from 'react-router-dom';
@@ -44,7 +44,7 @@ export default function RestoreModal({ onClose, onDone }) {
     try {
       const form = new FormData();
       form.append('file', file);
-      const res = await fetch('/api/events/restore/preview', {
+      const res = await fetch(apiUrl('/api/events/restore/preview'), {
         method: 'POST',
         headers: { Authorization: `Bearer ${getToken()}` },
         body: form,
@@ -85,7 +85,7 @@ export default function RestoreModal({ onClose, onDone }) {
     try {
       const form = new FormData();
       form.append('file', fileData);
-      const res = await fetch('/api/events/restore/confirm', {
+      const res = await fetch(apiUrl('/api/events/restore/confirm'), {
         method: 'POST',
         headers: { Authorization: `Bearer ${getToken()}` },
         body: form,

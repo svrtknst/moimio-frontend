@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import { participants } from '../services/api';
+import { apiUrl, participants } from '../services/api';
 import { I18nProvider, useI18n, SUPPORTED_LANGS } from '../hooks/useI18n';
 import TranslatedError from '../components/TranslatedError';
 import DemoNotice from '../components/DemoNotice';
@@ -80,7 +80,7 @@ function RegisterForm() {
 
   const loadEvent = async () => {
     try {
-      const res = await fetch(`/api/events/${eventId}/public`);
+      const res = await fetch(apiUrl(`/api/events/${eventId}/public`));
       if (!res.ok) throw new Error('Event not found');
       const eventData = await res.json();
       setEvent(eventData);
@@ -90,14 +90,14 @@ function RegisterForm() {
       if (defaultLang && !sessionStorage.getItem('moimio_lang_override')) {
         setLang(defaultLang);
       }
-      const fieldsRes = await fetch(`/api/events/${eventId}/fields/public`);
+      const fieldsRes = await fetch(apiUrl(`/api/events/${eventId}/fields/public`));
       if (fieldsRes.ok) setFields(await fieldsRes.json());
-      const cfRes = await fetch(`/api/events/${eventId}/custom-fields/public`);
+      const cfRes = await fetch(apiUrl(`/api/events/${eventId}/custom-fields/public`));
       if (cfRes.ok) setCustomFields(await cfRes.json());
       // LEGAL-1: best effort. A failure here must not take the form down
       // with it, so it is not allowed to throw into the outer catch.
       try {
-        const wsRes = await fetch('/api/workspace/public');
+        const wsRes = await fetch(apiUrl('/api/workspace/public'));
         if (wsRes.ok) {
           const ws = await wsRes.json();
           setPrivacyNoticeUrl(typeof ws?.privacy_notice_url === 'string' && ws.privacy_notice_url ? ws.privacy_notice_url : null);
@@ -106,7 +106,7 @@ function RegisterForm() {
       // Load categories for preference scope selector (if prefs enabled)
       if (eventData.settings?.enable_group_preferences) {
         setPrefEnabled(true);
-        const catRes = await fetch(`/api/events/${eventId}/allocation-categories/public`);
+        const catRes = await fetch(apiUrl(`/api/events/${eventId}/allocation-categories/public`));
         if (catRes.ok) setCategories(await catRes.json());
       }
     } catch (err) {

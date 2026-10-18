@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
 import { cfSortValue } from '../utils/customFieldSort';
 import { normalizeSearch as norm } from '../services/searchNormalize';
-import { participants as participantsApi, customFields as cfApi, getToken } from '../services/api';
+import { participants as participantsApi, customFields as cfApi, apiUrl, getToken } from '../services/api';
 import { useDateFormat } from '../hooks/useDateFormat';
 import { useI18n } from '../hooks/useI18n';
 import { useToast } from '../hooks/useToast';
@@ -186,7 +186,7 @@ export default function PeopleTable({ eventId, userId, participantList, noteCoun
   // so the CSV round-trips through the lenient importer.
   const handleDownloadCSV = (mode = 'full') => {
     setShowExportMenu(false);
-    const url = `/api/events/${eventId}/export/participants.csv${mode === 'emails' ? '?mode=emails' : ''}`;
+    const url = apiUrl(`/api/events/${eventId}/export/participants.csv${mode === 'emails' ? '?mode=emails' : ''}`);
     const filename = mode === 'emails' ? `emails_${eventId}.csv` : `participants_${eventId}.csv`;
     fetch(url, { headers: { Authorization: `Bearer ${getToken()}` } })
       .then(res => { if (!res.ok) throw new Error('Export failed'); return res.blob(); })
@@ -266,7 +266,7 @@ export default function PeopleTable({ eventId, userId, participantList, noteCoun
     setResendingIds(prev => new Set(prev).add(p.id));
     try {
       const res = await fetch(
-        `/api/events/${eventId}/participants/${p.id}/resend-confirmation`,
+        apiUrl(`/api/events/${eventId}/participants/${p.id}/resend-confirmation`),
         { method: 'POST', headers: { Authorization: `Bearer ${getToken()}` } }
       );
       if (!res.ok) {

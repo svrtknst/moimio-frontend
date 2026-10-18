@@ -33,6 +33,10 @@ RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 # Copy source and run Vite's production build. Produces /app/dist
 # with hashed asset filenames.
 COPY . .
+# Set to the backend origin when the frontend and backend are deployed
+# separately (for example: https://api.example.com). Leave unset when
+# requests should use the same-origin /api reverse proxy.
+ARG VITE_API_BASE_URL
 RUN npm run build
 
 # --- Stage 2: runtime ---

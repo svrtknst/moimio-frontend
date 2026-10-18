@@ -26,7 +26,7 @@
  */
 
 import { useEffect, useRef } from 'react';
-import { getToken } from '../services/api';
+import { apiUrl, getToken } from '../services/api';
 
 export function useEventStream({ eventId, surface, onEvent, enabled = true }) {
   // useRef so the callback can be swapped on each render without
@@ -50,7 +50,7 @@ export function useEventStream({ eventId, surface, onEvent, enabled = true }) {
         reconnectTimer = setTimeout(connect, 2000);
         return;
       }
-      const url = `/api/events/${eventId}/${surface}/stream?token=${encodeURIComponent(token)}`;
+      const url = apiUrl(`/api/events/${eventId}/${surface}/stream?token=${encodeURIComponent(token)}`);
       es = new EventSource(url);
 
       es.onopen = () => {

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom';
-import { events as eventsApi, participants as participantsApi, notes as notesApi, email as emailApi, allocationCategories, allocations as allocationsApi, getToken } from '../services/api';
+import { events as eventsApi, participants as participantsApi, notes as notesApi, email as emailApi, allocationCategories, allocations as allocationsApi, apiUrl, getToken } from '../services/api';
 import { formatErrorMessage } from '../services/api';
 import { useAuth, getPermsForEvent, getRoleForEvent } from '../hooks/useAuth';
 import { useDateFormat } from '../hooks/useDateFormat';
@@ -262,7 +262,7 @@ export default function EventDetailPage() {
   // services/api was already in the main bundle.
   const handleBackupBeforeDelete = async () => {
     try {
-      const url = `/api/events/${eventId}/export/backup.zip`;
+      const url = apiUrl(`/api/events/${eventId}/export/backup.zip`);
       const res = await fetch(url, { headers: { Authorization: `Bearer ${getToken()}` } });
       if (!res.ok) throw new Error('Backup failed');
       const cd = res.headers.get('Content-Disposition') || '';

@@ -14,7 +14,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { formatErrorMessage } from '../services/api';
+import { apiUrl, formatErrorMessage } from '../services/api';
 import { useParams, useNavigate } from 'react-router-dom';
 import { usePrefersReducedMotion } from '../hooks/usePrefersReducedMotion';
 import {
@@ -336,7 +336,7 @@ export default function SetupHub({ onEventChange }) {
   // already-uploaded marks/group-types could be lost on a careless click.
   const handleBackupBeforeDelete = async () => {
     try {
-      const url = `/api/events/${eventId}/export/backup.zip`;
+      const url = apiUrl(`/api/events/${eventId}/export/backup.zip`);
       const res = await fetch(url, { headers: { Authorization: `Bearer ${getToken()}` } });
       if (!res.ok) throw new Error('Backup failed');
       const cd = res.headers.get('Content-Disposition') || '';

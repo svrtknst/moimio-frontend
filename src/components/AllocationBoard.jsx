@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { normalizeSearch as norm } from '../services/searchNormalize';
-import { allocationUnits, allocations as allocApi, notes as notesApi, allocationCategories as catApi, preferenceRequests as prefApi, getToken , formatErrorMessage } from '../services/api';
+import { allocationUnits, allocations as allocApi, notes as notesApi, allocationCategories as catApi, preferenceRequests as prefApi, apiUrl, getToken , formatErrorMessage } from '../services/api';
 import NotesModal from './NotesModal';
 import MarkDots from './MarkDots';
 import MarkAssignModal from './MarkAssignModal';
@@ -274,7 +274,7 @@ export default function AllocationBoard({ eventId, eventName, category, allCateg
       // organisers can switch it for specific downloads (e.g. to hand
       // off to staff who read another language).
       params.set('lang', pdfLang);
-      const url = `/api/events/${eventId}/export/category/${category.id}/pdf?${params.toString()}`;
+      const url = apiUrl(`/api/events/${eventId}/export/category/${category.id}/pdf?${params.toString()}`);
       const res = await fetch(url, { headers: { Authorization: `Bearer ${getToken()}` } });
       if (!res.ok) {
         let detail = `HTTP ${res.status}`;
